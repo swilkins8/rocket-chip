@@ -29,6 +29,8 @@ with HasL1CacheParameters {
 
   // The 32 bits that determine the location of the XOR taps
   val taps = Reg(UInt(width = 32))
+
+  val length = Reg(UInt(log2Up(32)))
   // The bitmask that determines the final CRC length
   val outMask = Reg(UInt(width = 32))
   // The memory location to read for CRC calculation
@@ -38,7 +40,7 @@ with HasL1CacheParameters {
   // The current global data offset (in bits)
   val globalCount = Reg(UInt(width = 32))
   // The current block data offset (in bits)
-  val localCount = Reg(Uint(width = log2Up(cacheDataBits)))
+  val localIndex = Reg(Uint(width = log2Up(cacheDataBits)))
 
   val crcState = Reg(Uint(width = 32))
 
@@ -54,7 +56,7 @@ with HasL1CacheParameters {
 
   
 
-  val s_idle :: s_update :: s_acq :: s_recv :: s_calc :: s_resp :: Nil = Enum(Bits(), 6)
+  val s_idle :: s_update :: s_acq :: s_recv :: s_calc :: s_zeroes:: s_resp :: Nil = Enum(Bits(), 6)
   //  Idle, update len, acq data, recv data, calc CRC, responding
   val state = Reg(init = s_idle)
 
@@ -84,17 +86,18 @@ with HasL1CacheParameters {
         // If we're doing hardcoded type checks, yes
         state := s_update
       } .otherwise {
-        taps := io.cmd.bits.rs1
-        val length = Uint(io.cmd.bits.rs2)
-        val invLength = UInt(32) - length
+        length := Uint(io.cmd.bits.rs2)
         when (length < 32) {
+          val invLength = UInt(32) - length
           outMask := Cat(Fill(invLength, "0"), Fill(length, "1"))
         }
+        taps := (io.cmd.bits.rs1) << (32 - length)
       }
     } .otherwise {
       memsrc := io.cmd.bits.rs1
       resp_rd := io.cmd.bits.inst.rd
       memlen := UInt(io.cmd.bits.rs2)
+      crcState = Fill(UInt(32), "0")
       globalCount := UInt(0)
 
       // Should be good to go with the memory
@@ -125,17 +128,37 @@ with HasL1CacheParameters {
 
   when (state === s_calc) {
     when (UInt(globalCount) === UInt(length)) {
-      state := s_resp
+      localIndex := UInt(0)
+      state := s_zeroes
     } .elsewhen (localIndex == 0) {
       memsrc := next_addr
       state := s_acq
     } .otherwise {
       //TODO:  Calculate CRC
       //Use localIndex - 1 because localIndex = 0 is the escape from the current block
-      val currBit = recv_data(localIndex - 1)
+      val dataBit = recv_data(localIndex - 1)
+      val finalBit = crcstate(31)
+      for (i <- 1 until 31) {
+        crcState(i) := Mux(taps(i), crcState(i - 1) ^ finalBit, crcState(i - 1))
+      }
+      crcState(0) := dataBit ^ finalBit
 
       localIndex := localIndex - UInt(1)
       globalCount := globalCount + UInt(1)
+    }
+  }
+
+  when (state == s_zeroes) {
+    when (UInt(localIndex) >= UInt(length)) {
+      state := s_resp
+    } .otherwise {
+      val dataBit = UInt(0)
+      val finalBit = crcstate(31)
+      for (i <- 1 until 31) {
+        crcState(i) := Mux(taps(i), crcState(i - 1) ^ finalBit, crcState(i - 1))
+      }
+      crcState(0) := dataBit ^ finalBit
+      localIndex := localIndex + UInt(1)
     }
   }
 
