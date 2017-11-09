@@ -24,8 +24,6 @@ with HasL1CacheParameters {
 
   // Cache block offset, used for address calculation
   private val blockOffset = blockOffBits 
-  // Offset into the cache block, to grab bytes for CRC calculation
-  private val beatOffset = log2Up(cacheDataBits/8)
 
   val resp_rd = Reg(io.resp.bits.rd)
 
@@ -35,10 +33,14 @@ with HasL1CacheParameters {
   val outMask = Reg(UInt(width = 32))
   // The memory location to read for CRC calculation
   val memsrc = Reg(UInt(width = coreMaxAddrBits))
-  // The length (in bytes) of the data to calculate the CRC across
+  // The length (in bits) of the data to calculate the CRC across
   val memlen = Reg(UInt(width = 32))
-  // The current data offset (in bytes)
-  val count = Reg(UInt(width = 32))
+  // The current global data offset (in bits)
+  val globalCount = Reg(UInt(width = 32))
+  // The current block data offset (in bits)
+  val localCount = Reg(Uint(width = log2Up(cacheDataBits)))
+
+  val crcState = Reg(Uint(width = 32))
 
   val addr_block = memsrc(coreMaxAddrBits - 1, blockOffset)
   val offset = memsrc(blockOffset - 1, 0)
@@ -46,12 +48,8 @@ with HasL1CacheParameters {
 
   // Used to read memory for CRC calculation
   val (tl_out, edgesOut) = outer.atlNode.out(0)
-  // The received data from the mem request
-  val gnt = tl_out.d.bits
   // The cache line
   val recv_data = Reg(UInt(width = cacheDataBits))
-  // The current byte
-  val recv_beat = Reg(UInt(width = log2Up(cacheDataBeats+1)), init = UInt(0))
 
 
   
@@ -65,7 +63,7 @@ with HasL1CacheParameters {
   // Cmd response is valid when in response state
   io.resp.valid := (state === s_resp)
   io.resp.bits.rd := resp_rd
-  io.resp.bits.data := count
+  io.resp.bits.data := crcState & outMask
 
   // Request is valid in the acq state
   tl_out.a.valid := (state === s_acq)
@@ -81,18 +79,26 @@ with HasL1CacheParameters {
   when (io.cmd.fire()) {
     // Funct of 0 indicate updating type/length
     when (io.cmd.bits.funct === 0) {
-      taps := io.cmd.bits.rs1
-      val length = Uint(io.cmd.bits.rs2)
-      when (length < 32) {
-        outMask := Uint(0) + Fill(length, "1")
+      when (Uint(io.cmd.bits.rs1) === 0) {
+        // Is update state actually needed?
+        // If we're doing hardcoded type checks, yes
+        state := s_update
+      } .otherwise {
+        taps := io.cmd.bits.rs1
+        val length = Uint(io.cmd.bits.rs2)
+        val invLength = UInt(32) - length
+        when (length < 32) {
+          outMask := Cat(Fill(invLength, "0"), Fill(length, "1"))
+        }
       }
-      // Is update state actually needed?
-      // If we're doing hardcoded type checks, yes
-      state := s_update
     } .otherwise {
       memsrc := io.cmd.bits.rs1
       resp_rd := io.cmd.bits.inst.rd
-      count := UInt(0)
+      memlen := UInt(io.cmd.bits.rs2)
+      globalCount := UInt(0)
+
+      // Should be good to go with the memory
+      state := s_acq
     }
   }
 
@@ -111,13 +117,26 @@ with HasL1CacheParameters {
 
   // Memory request received
   when (tl_out.d.fire()) {
-    recv_beat := recv_beat + UInt(1)
-    recv_data := gnt.data
+    recv_data := tl_out.d.bits.data
+    // Fix the bit index
+    localIndex := UInt(cacheDataBits) - (offset * UInt(8))
     state := s_calc
   }
 
   when (state === s_calc) {
-    //TODO:  Calculate CRC
+    when (UInt(globalCount) === UInt(length)) {
+      state := s_resp
+    } .elsewhen (localIndex == 0) {
+      memsrc := next_addr
+      state := s_acq
+    } .otherwise {
+      //TODO:  Calculate CRC
+      //Use localIndex - 1 because localIndex = 0 is the escape from the current block
+      val currBit = recv_data(localIndex - 1)
+
+      localIndex := localIndex - UInt(1)
+      globalCount := globalCount + UInt(1)
+    }
   }
 
   // Response sent back to CPU
