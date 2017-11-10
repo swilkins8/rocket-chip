@@ -195,15 +195,30 @@ class WithRoccExample extends Config((site, here, up) => {
           generator = (p: Parameters) => {
             val translator = LazyModule(new TranslatorExample()(p))
             translator},
-          nPTWPorts = 1),
+          nPTWPorts = 1)
+        /*,
         RoCCParams(
           opcodes = OpcodeSet.custom2,
           generator = (p: Parameters) => {
             val counter = LazyModule(new CharacterCountExample()(p))
             counter
-          })
+          })*/
         ))
     }
+})
+
+
+class WithCRCAccelerator extends Config((site, here, up) => {
+  case RocketTilesKey => up(RocketTilesKey, site).map { r =>
+    r.copy(rocc = Seq(
+        RoCCParams(
+          opcodes = OpcodeSet.custom2,
+          generator = (p: Parameters) => {
+            val crcCalc = LazyModule(new CRC_Accelerator()(p))
+            crcCalc
+          })
+      ))
+  }
 })
 
 class WithDefaultBtb extends Config((site, here, up) => {

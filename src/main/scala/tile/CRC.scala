@@ -1,9 +1,20 @@
+package freechips.rocketchip.tile
+
+import Chisel._
+
+import freechips.rocketchip.config._
+import freechips.rocketchip.coreplex._
+import freechips.rocketchip.diplomacy._
+import freechips.rocketchip.rocket._
+import freechips.rocketchip.tilelink._
+import freechips.rocketchip.util.InOrderArbiter
+
 class CRC_Accelerator(implicit p: Parameters) extends LazyRoCC {
-  override lazy val module = new CustomAcceleratorModule(this)
+  override lazy val module = new CRC_AcceleratorModule(this)
   override val atlNode = TLClientNode(Seq(TLClientPortParameters(Seq(TLClientParameters("CharacterCountRoCC")))))
 }
 
-class CRC_AcceleratorModule(outer: CustomAccelerator) extends LazyRoCCModule(outer)
+class CRC_AcceleratorModule(outer: CRC_Accelerator) extends LazyRoCCModule(outer)
 with HasCoreParameters
 with HasL1CacheParameters {
   // The parts of the command are as follows
@@ -40,9 +51,9 @@ with HasL1CacheParameters {
   // The current global data offset (in bits)
   val globalCount = Reg(UInt(width = 32))
   // The current block data offset (in bits)
-  val localIndex = Reg(Uint(width = log2Up(cacheDataBits)))
+  val localIndex = Reg(UInt(width = log2Up(cacheDataBits)))
 
-  val crcState = Reg(Uint(width = 32))
+  val crcState = Reg(UInt(width = 32))
 
   val addr_block = memsrc(coreMaxAddrBits - 1, blockOffset)
   val offset = memsrc(blockOffset - 1, 0)
@@ -65,7 +76,7 @@ with HasL1CacheParameters {
   // Cmd response is valid when in response state
   io.resp.valid := (state === s_resp)
   io.resp.bits.rd := resp_rd
-  io.resp.bits.data := crcState & outMask
+  io.resp.bits.data := crcState
 
   // Request is valid in the acq state
   tl_out.a.valid := (state === s_acq)
@@ -80,24 +91,23 @@ with HasL1CacheParameters {
   // Command received from CPU
   when (io.cmd.fire()) {
     // Funct of 0 indicate updating type/length
-    when (io.cmd.bits.funct === 0) {
-      when (Uint(io.cmd.bits.rs1) === 0) {
+    when (io.cmd.bits.inst.funct === UInt(0)) {
+      when (io.cmd.bits.rs1 === UInt(0)) {
         // Is update state actually needed?
         // If we're doing hardcoded type checks, yes
         state := s_update
       } .otherwise {
-        length := Uint(io.cmd.bits.rs2)
-        when (length < 32) {
-          val invLength = UInt(32) - length
-          outMask := Cat(Fill(invLength, "0"), Fill(length, "1"))
+        length := io.cmd.bits.rs2
+        when (length < UInt(32)) {
+          outMask := ~(Fill(32, Bits("b0")) >> length)
         }
-        taps := (io.cmd.bits.rs1) << (32 - length)
+        taps := (io.cmd.bits.rs1) << (UInt(32) - length)
       }
     } .otherwise {
       memsrc := io.cmd.bits.rs1
       resp_rd := io.cmd.bits.inst.rd
-      memlen := UInt(io.cmd.bits.rs2)
-      crcState = Fill(UInt(32), "0")
+      memlen := io.cmd.bits.rs2
+      crcState := Fill(32, Bits("b0"))
       globalCount := UInt(0)
 
       // Should be good to go with the memory
@@ -127,17 +137,17 @@ with HasL1CacheParameters {
   }
 
   when (state === s_calc) {
-    when (UInt(globalCount) === UInt(length)) {
+    when (globalCount === length) {
       localIndex := UInt(0)
       state := s_zeroes
-    } .elsewhen (localIndex == 0) {
+    } .elsewhen (localIndex === UInt(0)) {
       memsrc := next_addr
       state := s_acq
     } .otherwise {
       //TODO:  Calculate CRC
       //Use localIndex - 1 because localIndex = 0 is the escape from the current block
-      val dataBit = recv_data(localIndex - 1)
-      val finalBit = crcstate(31)
+      val dataBit = recv_data(localIndex - UInt(1))
+      val finalBit = crcState(31)
       for (i <- 1 until 31) {
         crcState(i) := Mux(taps(i), crcState(i - 1) ^ finalBit, crcState(i - 1))
       }
@@ -148,12 +158,13 @@ with HasL1CacheParameters {
     }
   }
 
-  when (state == s_zeroes) {
-    when (UInt(localIndex) >= UInt(length)) {
+  when (state === s_zeroes) {
+    when (localIndex >= length) {
+      crcState := (crcState & outMask) >> (UInt(32) - length)
       state := s_resp
     } .otherwise {
       val dataBit = UInt(0)
-      val finalBit = crcstate(31)
+      val finalBit = crcState(31)
       for (i <- 1 until 31) {
         crcState(i) := Mux(taps(i), crcState(i - 1) ^ finalBit, crcState(i - 1))
       }

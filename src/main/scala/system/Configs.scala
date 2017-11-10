@@ -48,6 +48,8 @@ class DualChannelDualBankConfig extends Config(
 
 class RoccExampleConfig extends Config(new WithRoccExample ++ new DefaultConfig)
 
+class CRC_AcceleratorConfig extends Config(new WithCRCAccelerator ++ new BaseConfig)
+
 class Edge128BitConfig extends Config(
   new WithEdgeDataBits(128) ++ new BaseConfig)
 class Edge32BitConfig extends Config(
