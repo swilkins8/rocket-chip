@@ -48,7 +48,10 @@ class DualChannelDualBankConfig extends Config(
 
 class RoccExampleConfig extends Config(new WithRoccExample ++ new DefaultConfig)
 
-class CRC_AcceleratorConfig extends Config(new WithCRCAccelerator ++ new BaseConfig)
+class CRCAcceleratorConfig extends Config(new WithCRCAccelerator ++ new BaseConfig)
+class CRCAcceleratorSmallConfig extends Config(new WithNBigCores(2) ++ new CRCAcceleratorConfig)
+
+class CRCAcceleratorDefaultConfig extends Config(new CRCAcceleratorSmallConfig)
 
 class Edge128BitConfig extends Config(
   new WithEdgeDataBits(128) ++ new BaseConfig)

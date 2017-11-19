@@ -214,7 +214,7 @@ class WithCRCAccelerator extends Config((site, here, up) => {
         RoCCParams(
           opcodes = OpcodeSet.custom2,
           generator = (p: Parameters) => {
-            val crcCalc = LazyModule(new CRC_Accelerator()(p))
+            val crcCalc = LazyModule(new CRCAccelerator()(p))
             crcCalc
           })
       ))

@@ -9,12 +9,12 @@ import freechips.rocketchip.rocket._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util.InOrderArbiter
 
-class CRC_Accelerator(implicit p: Parameters) extends LazyRoCC {
-  override lazy val module = new CRC_AcceleratorModule(this)
-  override val atlNode = TLClientNode(Seq(TLClientPortParameters(Seq(TLClientParameters("CharacterCountRoCC")))))
+class CRCAccelerator(implicit p: Parameters) extends LazyRoCC {
+  override lazy val module = new CRCAcceleratorModule(this)
+  override val atlNode = TLClientNode(Seq(TLClientPortParameters(Seq(TLClientParameters("")))))
 }
 
-class CRC_AcceleratorModule(outer: CRC_Accelerator) extends LazyRoCCModule(outer)
+class CRCAcceleratorModule(outer: CRCAccelerator) extends LazyRoCCModule(outer)
 with HasCoreParameters
 with HasL1CacheParameters {
   // The parts of the command are as follows
