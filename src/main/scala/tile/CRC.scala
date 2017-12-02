@@ -39,7 +39,7 @@ with HasL1CacheParameters {
   val resp_rd = Reg(io.resp.bits.rd)
 
   // The 32 bits that determine the location of the XOR taps
-  val taps = Reg(UInt(width = 32))
+  val taps = Reg(Vec(32, Bool()))
 
   val length = Reg(UInt(log2Up(32)))
   // The bitmask that determines the final CRC length
@@ -53,7 +53,7 @@ with HasL1CacheParameters {
   // The current block data offset (in bits)
   val localIndex = Reg(UInt(width = log2Up(cacheDataBits)))
 
-  val crcState = Reg(UInt(width = 32))
+  val crcState = Reg(Vec(32, Bool()))
 
   val addr_block = memsrc(coreMaxAddrBits - 1, blockOffset)
   val offset = memsrc(blockOffset - 1, 0)
@@ -67,7 +67,7 @@ with HasL1CacheParameters {
 
   
 
-  val s_idle :: s_update :: s_acq :: s_recv :: s_calc :: s_zeroes:: s_resp :: Nil = Enum(Bits(), 6)
+  val s_idle :: s_update :: s_acq :: s_recv :: s_calc :: s_zeroes:: s_resp :: Nil = Enum(Bits(), 7)
   //  Idle, update len, acq data, recv data, calc CRC, responding
   val state = Reg(init = s_idle)
 
@@ -76,7 +76,7 @@ with HasL1CacheParameters {
   // Cmd response is valid when in response state
   io.resp.valid := (state === s_resp)
   io.resp.bits.rd := resp_rd
-  io.resp.bits.data := crcState
+  io.resp.bits.data := Cat(crcState)
 
   // Request is valid in the acq state
   tl_out.a.valid := (state === s_acq)
@@ -90,6 +90,7 @@ with HasL1CacheParameters {
 
   // Command received from CPU
   when (io.cmd.fire()) {
+    resp_rd := io.cmd.bits.inst.rd
     // Funct of 0 indicate updating type/length
     when (io.cmd.bits.inst.funct === UInt(0)) {
       when (io.cmd.bits.rs1 === UInt(0)) {
@@ -99,15 +100,26 @@ with HasL1CacheParameters {
       } .otherwise {
         length := io.cmd.bits.rs2
         when (length < UInt(32)) {
-          outMask := ~(Fill(32, Bits("b0")) >> length)
+          outMask := ~(Fill(32, Bits("b1")) << length)
         }
-        taps := (io.cmd.bits.rs1) << (UInt(32) - length)
+        taps(31) := true.B
+        val shifted = (io.cmd.bits.rs1) << (UInt(32) - length)
+        for (i <- 0 until 30) {
+          taps(i) := shifted(i)
+        }
+        state := s_resp // Have to do this to get the processor to recognize that the update is done
+        //taps := (io.cmd.bits.rs1) << (UInt(32) - length)
       }
     } .otherwise {
       memsrc := io.cmd.bits.rs1
       resp_rd := io.cmd.bits.inst.rd
       memlen := io.cmd.bits.rs2
-      crcState := Fill(32, Bits("b0"))
+      crcState := Vec.fill(32){Bool(false)}
+      //for (i <- 0 until 31) {
+      //  crcState(i) := false.B
+      //}
+
+      //crcState := Vec(32, false.B)
       globalCount := UInt(0)
 
       // Should be good to go with the memory
@@ -117,7 +129,7 @@ with HasL1CacheParameters {
 
   // Update taps/length
   when (state === s_update) {
-    when (taps === UInt(0)) {
+    when (Cat(taps) === UInt(0)) {
       // TODO:  Set taps & mask based on table of predefined types
     }
     state := s_idle
@@ -149,9 +161,11 @@ with HasL1CacheParameters {
       val dataBit = recv_data(localIndex - UInt(1))
       val finalBit = crcState(31)
       for (i <- 1 until 31) {
-        crcState(i) := Mux(taps(i), crcState(i - 1) ^ finalBit, crcState(i - 1))
+        val bitXOR = crcState(i - 1) ^ finalBit
+        crcState(i) := Mux(taps(i), bitXOR, crcState(i - 1))
       }
-      crcState(0) := dataBit ^ finalBit
+      val bitXOR = dataBit ^ finalBit
+      crcState(0) := Mux(taps(0), bitXOR, dataBit)
 
       localIndex := localIndex - UInt(1)
       globalCount := globalCount + UInt(1)
@@ -160,15 +174,23 @@ with HasL1CacheParameters {
 
   when (state === s_zeroes) {
     when (localIndex >= length) {
-      crcState := (crcState & outMask) >> (UInt(32) - length)
+      //val masked = Cat(crcState) & outMask
+      val shiftAmt = UInt(32) - length
+      val shifted = Cat(crcState) >> shiftAmt
+      val masked = shifted & outMask
+      for (i <- 0 until 31) {
+        crcState(i) := masked(i)
+      }
       state := s_resp
     } .otherwise {
       val dataBit = UInt(0)
       val finalBit = crcState(31)
       for (i <- 1 until 31) {
-        crcState(i) := Mux(taps(i), crcState(i - 1) ^ finalBit, crcState(i - 1))
+        val bitXOR = crcState(i - 1) ^ finalBit
+        crcState(i) := Mux(taps(i), bitXOR, crcState(i - 1))
       }
-      crcState(0) := dataBit ^ finalBit
+      val bitXOR = dataBit ^ finalBit
+      crcState(0) := Mux(taps(0), bitXOR, dataBit)
       localIndex := localIndex + UInt(1)
     }
   }
