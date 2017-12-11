@@ -33,8 +33,6 @@ with HasCoreParameters {
   val taps = Reg(Vec(32, Bool()))
 
   val length = Reg(UInt(width = 10))
-  // The bitmask that determines the final CRC length
-  val outMask = Reg(UInt(width = 32))
   // The memory location to read for CRC calculation
   val memsrc = Reg(UInt(width = coreMaxAddrBits))
   // The length (in bits) of the data to calculate the CRC across
@@ -43,6 +41,12 @@ with HasCoreParameters {
   val globalCount = Reg(UInt(width = 32))
   // The current block data offset (in bits)
   val localIndex = Reg(UInt(width = 16))
+
+  val startVal = Reg(UInt(width = 64), init = UInt(0))
+  val finalXOR = Reg(UInt(width = 32), init = UInt(0))
+
+  val flipInput = Reg(Bool(), init = false.B)
+  val flipOutput = Reg(Bool(), init = false.B)
 
   val crcState = Reg(Vec(32, Bool()))
   val recv_data = Reg(UInt(width = 64)) //Get 64 bits per load
@@ -63,30 +67,39 @@ with HasCoreParameters {
   when (io.cmd.fire()) {
     // Funct of 0 indicate updating type/length
     resp_rd := io.cmd.bits.inst.rd
-    when (io.cmd.bits.inst.funct === UInt(0)) {
+    val funct = io.cmd.bits.inst.funct
+    when (funct === UInt(0)) {
       // Update taps for CRC polynomial
-      val lengthInput = io.cmd.bits.rs2(9, 0)
-      length := lengthInput
-      when (lengthInput < UInt(33)) {
-        outMask := ~(Fill(32, true.B) << lengthInput)
-      }
-      val shiftAmt = UInt(32) - lengthInput
-      val shifted = io.cmd.bits.rs1 << shiftAmt
+      length := io.cmd.bits.rs2(9, 0)
       for (i <- 0 to 31) {
-        taps(i) := shifted(i)
+        taps(i) := io.cmd.bits.rs1(i)
       }
-      /*for (i <- 10 to 31) {
-        taps(i) := false.B
-      }*/
       state := s_resp
-      //taps := (io.cmd.bits.rs1) << (shiftAmt)
+    } .elsewhen (funct === UInt(1)) {
+      //Just update the start and final values
+      startVal := io.cmd.bits.rs1
+      finalXOR := io.cmd.bits.rs2
+      state := s_resp
+    } .elsewhen (funct === UInt(2)) {
+      when (io.cmd.bits.rs1 === UInt(0)) {
+        flipInput := false.B
+      } .otherwise {
+        flipInput := true.B
+      }
+      when (io.cmd.bits.rs2 === UInt(0)) {
+        flipOutput := false.B
+      } .otherwise {
+        flipOutput := true.B
+      }
+      state := s_resp
     } .otherwise {
       memsrc := io.cmd.bits.rs1
       memlen := io.cmd.bits.rs2
 
       globalCount := UInt(0)
-      crcState := Vec.fill(32){false.B}
-      // Should be good to go with the memory
+      for (i <- 0 to 31) {
+        crcState(i) := false.B
+      }
       state := s_acq
     }
   }
@@ -101,7 +114,47 @@ with HasCoreParameters {
   // Memory request received
   when (state === s_recv) {
     when (io.mem.resp.valid) {
-      recv_data := io.mem.resp.bits.data
+      val shiftAmt = UInt(64) - length
+      val shifted = startVal << shiftAmt
+      val memData = io.mem.resp.bits.data ^ shifted
+
+/*      val allBytes = new Array[UInt](8)
+      for (i <- 7 to 0) {
+        val currByte = memData(i*8 + 7, i*8)
+        allBytes(i) := Mux(flipInput === true.B, Reverse(currByte), currByte)
+      }
+      val halfBytes = new Array[UInt](4)
+      for (i <- 3 to 0) {
+        halfBytes(i) = Cat(allBytes(i*2 + 1), allBytes(i*2))
+      }
+      val quarterBytes = new Array[UInt](2)
+      for (i <- 1 to 0) {
+        quarterBytes(i) = Cat(halfBytes(i*2 + 1), halfBytes(i*2))
+      }
+      val endData = Cat(quarterBytes(1), quarterBytes(0))*/
+
+      val byte1 = memData(63, 56)
+      val byte2 = memData(55, 48)
+      val byte3 = memData(47, 40)
+      val byte4 = memData(39, 32)
+      val byte5 = memData(31, 24)
+      val byte6 = memData(23, 16)
+      val byte7 = memData(15, 8)
+      val byte8 = memData(7, 0)
+      //val allBytes = Array(byte1, byte2, byte3, byte4, byte5, byte6, byte7, byte8)
+      val finalByte1 = Mux(flipInput === true.B, Reverse(byte1), byte1)
+      val finalByte2 = Mux(flipInput === true.B, Reverse(byte2), byte2)
+      val finalByte3 = Mux(flipInput === true.B, Reverse(byte3), byte3)
+      val finalByte4 = Mux(flipInput === true.B, Reverse(byte4), byte4)
+      val finalByte5 = Mux(flipInput === true.B, Reverse(byte5), byte5)
+      val finalByte6 = Mux(flipInput === true.B, Reverse(byte6), byte6)
+      val finalByte7 = Mux(flipInput === true.B, Reverse(byte7), byte7)
+      val finalByte8 = Mux(flipInput === true.B, Reverse(byte8), byte8)
+
+      val endData = Cat(finalByte1, finalByte2, finalByte3, finalByte4, finalByte5, finalByte6, finalByte7, finalByte8)
+
+      recv_data := endData
+      startVal := UInt(0)
       localIndex := UInt(64)
       state := s_calc
     }
@@ -115,10 +168,12 @@ with HasCoreParameters {
       memsrc := memsrc + UInt(8)
       state := s_acq
     } .otherwise {
-      //TODO:  Calculate CRC
       //Use localIndex - 1 because localIndex = 0 is the escape from the current block
-      val dataBit = recv_data(localIndex - UInt(1))
-      val finalBit = crcState(31)
+      val normalIndex = localIndex - UInt(1)
+      val reversedIndex = UInt(64) - localIndex
+      val index = normalIndex //Mux(flipInput === true.B, reversedIndex, normalIndex)
+      val dataBit = recv_data(index)
+      val finalBit = crcState(length - UInt(1))
       
       for (i <- 1 to 31) {
         val bitXOR = crcState(i - 1) ^ finalBit
@@ -126,27 +181,27 @@ with HasCoreParameters {
       }
       val bitXOR = dataBit ^ finalBit
       crcState(0) := Mux(taps(0), bitXOR, dataBit)
-      /*for (i <- 0 to 31) {
-        crcState(i) := recv_data(i)
-      }*/;
+
       localIndex := localIndex - UInt(1)
       globalCount := globalCount + UInt(1)
     }
   }
 
   when (state === s_zeroes) {
-    when (localIndex >= UInt(32)) {
-      //val masked = Cat(crcState) & outMask
+    when (localIndex >= length) {
+      val finalState = Reverse(Cat(crcState))
       val shiftAmt = UInt(32) - length
-      val shifted = Reverse(Cat(crcState)) >> shiftAmt
-      val masked = shifted & outMask
+      val reversed = Reverse(finalState) >> shiftAmt
+      val finalVal = Mux(flipOutput === true.B, reversed, finalState)
+      val mask = ~(SInt(0xFFFFFFFF) << length)
+      //Mux(flipOutput =/= UInt(0), Cat(crcState), 
       for (i <- 0 to 31) {
-        crcState(i) := shifted(i)  
+        crcState(i) := (finalVal(i) ^ finalXOR(i)) & mask(i)
       }
       state := s_resp
     } .otherwise {
       val dataBit = UInt(0)
-      val finalBit = crcState(31)
+      val finalBit = crcState(length - UInt(1))
       for (i <- 1 to 31) {
         val bitXOR = crcState(i - 1) ^ finalBit
         crcState(i) := Mux(taps(i), bitXOR, crcState(i - 1))
